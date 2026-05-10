@@ -1,0 +1,251 @@
+
+<style>
+  h2.sr-only { position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0); }
+  .grid2 { display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px; }
+  .grid3 { display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:16px; }
+  .card { background:var(--color-background-secondary);border-radius:var(--border-radius-md);padding:12px 14px; }
+  .card label { font-size:12px;color:var(--color-text-secondary);display:block;margin-bottom:2px; }
+  .card .val { font-size:20px;font-weight:500;color:var(--color-text-primary); }
+  .card .unit { font-size:12px;color:var(--color-text-secondary);margin-left:3px; }
+  .opt-tag { font-size:11px;background:var(--color-background-success);color:var(--color-text-success);padding:2px 8px;border-radius:4px;margin-left:6px;vertical-align:middle; }
+  .row { display:flex;align-items:center;gap:10px;margin-bottom:10px; }
+  .row label { font-size:13px;color:var(--color-text-secondary);width:190px;flex-shrink:0; }
+  .row input[type=range] { flex:1; }
+  .row .readout { font-size:13px;font-weight:500;color:var(--color-text-primary);width:68px;text-align:right;flex-shrink:0; }
+  .section-title { font-size:13px;font-weight:500;color:var(--color-text-secondary);margin:18px 0 8px;text-transform:uppercase;letter-spacing:.04em; }
+  .warn { font-size:12px;color:var(--color-text-danger);margin-top:6px;min-height:16px; }
+  .legend { display:flex;gap:18px;font-size:12px;color:var(--color-text-secondary);margin-bottom:6px;flex-wrap:wrap; }
+  .legend span { display:flex;align-items:center;gap:5px; }
+  .leg-sq { width:12px;height:4px;border-radius:2px;display:inline-block; }
+</style>
+<h2 class="sr-only">DC motor drivetrain optimizer: adjust gear ratio, wheel radius, and mass to maximize vehicle output power</h2>
+
+<div class="section-title">Motor operating point</div>
+<div class="legend">
+  <span><span class="leg-sq" style="background:#4a90d9"></span>Motor output power</span>
+  <span><span class="leg-sq" style="background:#e07b39"></span>Vehicle output power</span>
+  <span><span class="leg-sq" style="height:10px;width:10px;border-radius:50%;background:#e05252"></span>Current operating point</span>
+</div>
+<div style="position:relative;width:100%;height:220px;">
+  <canvas id="motorChart" role="img" aria-label="Motor torque vs power curve showing operating point"></canvas>
+</div>
+
+<div class="section-title">Results</div>
+<div class="grid3">
+  <div class="card"><label>Motor torque load</label><span class="val" id="r-Tm">—</span><span class="unit">mN·m</span></div>
+  <div class="card"><label>Motor speed</label><span class="val" id="r-om">—</span><span class="unit">rad/s</span></div>
+  <div class="card"><label>Motor output power</label><span class="val" id="r-Pm">—</span><span class="unit">W</span></div>
+</div>
+<div class="grid3">
+  <div class="card"><label>Vehicle speed</label><span class="val" id="r-v">—</span><span class="unit">m/s</span></div>
+  <div class="card"><label>Vehicle output power</label><span class="val" id="r-Pc">—</span><span class="unit">W</span></div>
+  <div class="card"><label>Drivetrain efficiency</label><span class="val" id="r-eta">—</span><span class="unit">%</span></div>
+</div>
+<div class="grid2">
+  <div class="card"><label>Optimal mass for this G, r</label><span class="val" id="r-mopt">—</span><span class="unit">kg</span></div>
+  <div class="card"><label>Optimal G for this mass, r</label><span class="val" id="r-Gopt">—</span><span class="unit">:1</span></div>
+</div>
+<div class="warn" id="warn-stall"></div>
+
+<div class="section-title">Controls</div>
+<div class="row">
+  <label>Gear ratio G (reduction)</label>
+  <input type="range" id="sl-G" min="1" max="80" step="0.5" value="20">
+  <span class="readout" id="out-G">20 : 1</span>
+</div>
+<div class="row">
+  <label>Wheel radius r (mm)</label>
+  <input type="range" id="sl-r" min="10" max="60" step="1" value="30">
+  <span class="readout" id="out-r">30 mm</span>
+</div>
+<div class="row">
+  <label>Vehicle mass m (g)</label>
+  <input type="range" id="sl-m" min="50" max="1000" step="5" value="350">
+  <span class="readout" id="out-m">350 g</span>
+</div>
+<div class="row">
+  <label>Ramp angle θ (°)</label>
+  <input type="range" id="sl-theta" min="1" max="10" step="0.5" value="5">
+  <span class="readout" id="out-theta">5°</span>
+</div>
+<div class="row">
+  <label>Drivetrain efficiency η (%)</label>
+  <input type="range" id="sl-eta" min="30" max="95" step="1" value="70">
+  <span class="readout" id="out-eta">70%</span>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script>
+const MOTOR = {
+  omega0: 3500 * 2 * Math.PI / 60,
+  Tstall: 2.51e-3,
+  Istall: 0.39,
+  V: 6
+};
+
+function getState() {
+  return {
+    G: parseFloat(document.getElementById('sl-G').value),
+    r: parseFloat(document.getElementById('sl-r').value) / 1000,
+    m: parseFloat(document.getElementById('sl-m').value) / 1000,
+    theta: parseFloat(document.getElementById('sl-theta').value) * Math.PI / 180,
+    eta: parseFloat(document.getElementById('sl-eta').value) / 100
+  };
+}
+
+function compute(s) {
+  const g = 9.81;
+  const F_needed = s.m * g * Math.sin(s.theta);
+  const T_motor = F_needed * s.r / (s.G * s.eta);
+  const frac = T_motor / MOTOR.Tstall;
+  const omega_motor = MOTOR.omega0 * (1 - frac);
+  const omega_wheel = omega_motor / s.G;
+  const v = omega_wheel * s.r;
+  const P_motor = T_motor * omega_motor;
+  const P_car = F_needed * v;
+  const eff_actual = P_car / (MOTOR.V * MOTOR.Istall * (1 - omega_motor / MOTOR.omega0));
+  const m_opt = (s.G * s.eta * MOTOR.Tstall) / (2 * s.r * g * Math.sin(s.theta));
+  const G_opt = (s.m * g * Math.sin(s.theta) * s.r) / (s.eta * MOTOR.Tstall / 2);
+  return { T_motor, frac, omega_motor, v, P_motor, P_car, eff_actual, m_opt, G_opt, stalled: frac >= 1 };
+}
+
+function fmt(x, d) { return isNaN(x) || !isFinite(x) ? '—' : x.toFixed(d); }
+
+let chart;
+function buildChart() {
+  const N = 100;
+  const Ts = Array.from({length: N+1}, (_,i) => i / N * MOTOR.Tstall * 1000);
+  const Pmotor = Ts.map(t => {
+    const tm = t / 1000;
+    const om = MOTOR.omega0 * (1 - tm / MOTOR.Tstall);
+    return tm * om;
+  });
+  const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+  const textCol = isDark ? '#b4b2a9' : '#5f5e5a';
+  const gridCol = isDark ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.06)';
+
+  chart = new Chart(document.getElementById('motorChart'), {
+    type: 'line',
+    data: {
+      labels: Ts.map(t => t.toFixed(3)),
+      datasets: [
+        {
+          label: 'Motor output power',
+          data: Pmotor,
+          borderColor: '#4a90d9',
+          borderWidth: 2,
+          pointRadius: 0,
+          tension: 0.3,
+          fill: false
+        },
+        {
+          label: 'Vehicle output power',
+          data: Ts.map(() => null),
+          borderColor: '#e07b39',
+          borderWidth: 2,
+          pointRadius: 0,
+          tension: 0.3,
+          fill: false
+        },
+        {
+          label: 'Operating point',
+          data: [],
+          borderColor: '#e05252',
+          backgroundColor: '#e05252',
+          pointRadius: 7,
+          pointHoverRadius: 9,
+          showLine: false
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => ctx.dataset.label + ': ' + ctx.parsed.y.toFixed(4) + ' W'
+          }
+        }
+      },
+      scales: {
+        x: {
+          title: { display: true, text: 'Torque (mN·m)', color: textCol, font: {size:12} },
+          ticks: { color: textCol, maxTicksLimit: 8, callback: (v, i, arr) => Ts[i] ? Ts[i].toFixed(2) : '' },
+          grid: { color: gridCol }
+        },
+        y: {
+          title: { display: true, text: 'Power (W)', color: textCol, font: {size:12} },
+          ticks: { color: textCol },
+          grid: { color: gridCol },
+          min: 0
+        }
+      }
+    }
+  });
+}
+
+function updateVehicleCurve(s) {
+  const g = 9.81;
+  const N = 100;
+  const masses = Array.from({length: N+1}, (_,i) => i / N * 1.2);
+  const Pcar = masses.map(mi => {
+    const F = mi * g * Math.sin(s.theta);
+    const Tm = F * s.r / (s.G * s.eta);
+    if (Tm >= MOTOR.Tstall) return 0;
+    const om = MOTOR.omega0 * (1 - Tm / MOTOR.Tstall);
+    const v = (om / s.G) * s.r;
+    return F * v;
+  });
+  const TsForMasses = masses.map(mi => {
+    const F = mi * g * Math.sin(s.theta);
+    return (F * s.r / (s.G * s.eta)) * 1000;
+  });
+  chart.data.datasets[1].data = TsForMasses.map((t, i) => ({ x: t.toFixed(3), y: Pcar[i] }));
+  const c = compute(s);
+  if (!c.stalled) {
+    chart.data.datasets[2].data = [{ x: (c.T_motor * 1000).toFixed(3), y: c.P_motor }];
+  } else {
+    chart.data.datasets[2].data = [];
+  }
+  chart.update('none');
+}
+
+function update() {
+  const s = getState();
+  document.getElementById('out-G').textContent = s.G.toFixed(1) + ' : 1';
+  document.getElementById('out-r').textContent = (s.r * 1000).toFixed(0) + ' mm';
+  document.getElementById('out-m').textContent = (s.m * 1000).toFixed(0) + ' g';
+  document.getElementById('out-theta').textContent = (s.theta * 180 / Math.PI).toFixed(1) + '°';
+  document.getElementById('out-eta').textContent = (s.eta * 100).toFixed(0) + '%';
+
+  const c = compute(s);
+  const warn = document.getElementById('warn-stall');
+
+  if (c.stalled) {
+    warn.textContent = '⚠ Motor stalls — load is too heavy for this G/r. Increase G or reduce mass.';
+    ['r-Tm','r-om','r-v','r-Pm','r-Pc','r-eta'].forEach(id => document.getElementById(id).textContent = '—');
+  } else {
+    warn.textContent = '';
+    document.getElementById('r-Tm').textContent = fmt(c.T_motor * 1000, 3);
+    document.getElementById('r-om').textContent = fmt(c.omega_motor, 1);
+    document.getElementById('r-v').textContent = fmt(c.v, 3);
+    document.getElementById('r-Pm').textContent = fmt(c.P_motor, 4);
+    document.getElementById('r-Pc').textContent = fmt(c.P_car, 4);
+    document.getElementById('r-eta').textContent = fmt(c.eff_actual * 100, 1);
+  }
+
+  document.getElementById('r-mopt').textContent = fmt(c.m_opt * 1000, 1) + ' g';
+  document.getElementById('r-Gopt').textContent = fmt(c.G_opt, 1);
+
+  updateVehicleCurve(s);
+}
+
+buildChart();
+['sl-G','sl-r','sl-m','sl-theta','sl-eta'].forEach(id => {
+  document.getElementById(id).addEventListener('input', update);
+});
+update();
+</script>
